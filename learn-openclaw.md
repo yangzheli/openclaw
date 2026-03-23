@@ -11,7 +11,10 @@
 3. [消息处理流程](#3-消息处理流程)
 4. [飞书 Channel 实现](#4-飞书-channel-实现)
 5. [Agents 人设存储机制](#5-agents-人设存储机制)
-6. [关键设计模式](#6-关键设计模式)
+6. [Multi-Agent 路由机制](#6-multi-agent-路由机制)
+7. [多 Agent 并发处理机制](#7-多-agent-并发处理机制)
+8. [Agent 工具系统](#8-agent-工具系统)
+9. [关键设计模式](#9-关键设计模式)
 
 ---
 
@@ -32,6 +35,7 @@ openclaw/
 │   ├── plugin-sdk/        # 插件 SDK 公共 API
 │   ├── acp/               # Agent Control Protocol
 │   ├── config/            # 配置管理
+│   ├── process/           # 进程管理（队列、Lane）
 │   └── infra/             # 基础设施/工具
 ├── extensions/            # 扩展插件包
 │   ├── feishu/           # 飞书 Channel 插件
@@ -274,7 +278,7 @@ Agent 是与 AI 模型交互的核心。
 │     src/agents/pi-embedded-runner/run.ts:267                    │
 │                                                                 │
 │     核心流程:                                                    │
-│     1. 解析会话车道 (SessionLane)                        │
+│     1. 解析会话车道 (SessionLane)                                │
 │     2. 加载运行时插件                                             │
 │     3. 运行 hooks (before_model_resolve, before_agent_start)    │
 │     4. 解析模型 resolveModelAsync()                              │
@@ -467,7 +471,7 @@ type AgentConfig = {
   model?: AgentModelConfig;      // 模型配置
   skills?: string[];             // 技能过滤
   humanDelay?: HumanDelayConfig; // 人性化延迟
-  sandbox?: AgentSandboxConfig;  // 沙箱配置
+  sandbox?: AgentSandboxConfig;  # 沙箱配置
   tools?: AgentToolsConfig;      // 工具配置
 };
 
@@ -494,48 +498,7 @@ type IdentityConfig = {
 | `HEARTBEAT.md` | 心跳提示 | 心跳检查时的响应 |
 | `MEMORY.md` | 记忆存储 | 长期记忆 |
 
-### 5.4 Bootstrap 文件加载流程
-
-```
-Agent 运行时
-      │
-      ▼
-┌─────────────────────────────────────────────────────────┐
-│  resolveBootstrapContextForRun()                        │
-│  src/agents/bootstrap-files.ts:98                       │
-│                                                         │
-│  1. 解析 workspaceDir                                   │
-│  2. 加载 bootstrap 文件                                 │
-│  3. 应用 hook 覆盖                                      │
-│  4. 构建上下文文件                                      │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│  loadWorkspaceBootstrapFiles()                          │
-│  src/agents/workspace.ts:487                            │
-│                                                         │
-│  按顺序加载:                                            │
-│  1. AGENTS.md                                          │
-│  2. SOUL.md       ← 核心人设                            │
-│  3. TOOLS.md                                           │
-│  4. IDENTITY.md   ← 身份信息                            │
-│  5. USER.md                                            │
-│  6. HEARTBEAT.md                                       │
-│  7. BOOTSTRAP.md                                       │
-│  8. MEMORY.md                                          │
-└────────────────────────┬────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│  buildSystemPrompt()                                    │
-│  src/agents/system-prompt.ts                            │
-│                                                         │
-│  将 bootstrap 文件内容注入到系统提示词中                │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 5.5 配置示例
+### 5.4 配置示例
 
 **`~/.openclaw/openclaw.json`:**
 
@@ -554,8 +517,7 @@ Agent 运行时
         "identity": {
           "name": "OpenClaw",
           "emoji": "🤖",
-          "theme": "blue",
-          "avatar": "https://example.com/avatar.png"
+          "theme": "blue"
         },
         "model": "claude-sonnet-4-6",
         "workspace": "~/projects/workspace"
@@ -576,49 +538,7 @@ Agent 运行时
 }
 ```
 
-**`~/.openclaw/agents/default/agent/SOUL.md` (核心人设):**
-
-```markdown
-# Soul
-
-You are OpenClaw, a helpful AI assistant.
-
-## Personality
-- Friendly and professional
-- Concise but thorough
-- Proactive in suggesting solutions
-
-## Communication Style
-- Use clear, simple language
-- Break down complex topics
-- Provide examples when helpful
-```
-
-### 5.6 人设生效优先级
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  1. IdentityConfig (openclaw.json)                      │
-│     - name, emoji, theme, avatar                        │
-│     → 用于 UI 显示和回复格式                            │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  2. SOUL.md / IDENTITY.md (workspace bootstrap)         │
-│     - 核心人设和身份定义                                 │
-│     → 注入到系统提示词中                                 │
-└─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────┐
-│  3. Hooks 覆盖                                          │
-│     - before_agent_start hook 可动态修改                │
-│     → 运行时动态调整                                     │
-└─────────────────────────────────────────────────────────┘
-```
-
-### 5.7 多 Agent 隔离
+### 5.5 多 Agent 隔离
 
 每个 Agent 通过独立的目录实现隔离：
 
@@ -627,22 +547,373 @@ You are OpenClaw, a helpful AI assistant.
 - **Auth 隔离**: 每个 agent 可配置独立的认证配置 (`auth-profiles.json`)
 - **Memory 隔离**: 每个 agent 有独立的 `MEMORY.md`
 
-### 5.8 关键代码路径
+---
 
-| 功能 | 文件 | 函数 |
+## 6. Multi-Agent 路由机制
+
+### 6.1 Session Key 结构
+
+会话唯一标识格式：
+
+```
+agent:<agentId>:<channel>:<accountId>:<peerKind>:<peerId>
+
+示例:
+- agent:main:telegram:default:direct:user123
+- agent:assistant:discord:account1:group:chat456
+- agent:researcher:feishu:default:direct:ou_abc123
+```
+
+### 6.2 绑定配置结构
+
+**`src/config/types.agents.ts:28-59`** 定义：
+
+```typescript
+// 路由绑定
+type AgentRouteBinding = {
+  type?: "route";           // 默认为 route
+  agentId: string;          // 目标 Agent ID
+  comment?: string;
+  match: AgentBindingMatch; // 匹配条件
+};
+
+// 匹配条件
+type AgentBindingMatch = {
+  channel: string;          // 通道: telegram, discord, feishu...
+  accountId?: string;       // 账户 ID 或 "*"
+  peer?: { kind, id };      // 直接匹配: direct/group/channel + ID
+  guildId?: string;         // Discord 服务器 ID
+  teamId?: string;          // 团队 ID (Slack/Teams)
+  roles?: string[];         // Discord 角色 ID
+};
+```
+
+### 6.3 路由解析流程
+
+**源码**: `src/routing/resolve-route.ts:614-804`
+
+```
+                        ┌──────────────────┐
+                        │  入站消息事件     │
+                        │  channel, account │
+                        │  peer, guild, team│
+                        └────────┬─────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  resolveAgentRoute(input)                                        │
+│                                                                  │
+│  1. 加载 bindings (按 channel + account 过滤)                    │
+│  2. 构建 bindings 索引 (byPeer, byGuild, byTeam...)              │
+│  3. 按优先级逐层匹配                                             │
+└──────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  匹配优先级 (tiers)                                              │
+├──────────────────────────────────────────────────────────────────┤
+│  1. binding.peer        → 直接 peer 匹配                         │
+│  2. binding.peer.parent → 线程父级继承                           │
+│  3. binding.guild+roles → Discord 服务器 + 角色匹配              │
+│  4. binding.guild       → Discord 服务器匹配                     │
+│  5. binding.team        → 团队匹配 (Slack/Teams)                 │
+│  6. binding.account     → 账户级别匹配                           │
+│  7. binding.channel     → 通道级别匹配 (accountId="*")           │
+│  8. default             → 默认 Agent                             │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 6.4 绑定配置示例
+
+```json5
+{
+  "bindings": [
+    // 1. 特定用户 → assistant
+    {
+      "agentId": "assistant",
+      "match": {
+        "channel": "telegram",
+        "peer": { "kind": "direct", "id": "user123456" }
+      }
+    },
+
+    // 2. Discord 特定服务器 + 角色 → researcher
+    {
+      "agentId": "researcher",
+      "match": {
+        "channel": "discord",
+        "guildId": "987654321",
+        "roles": ["1122334455"]
+      }
+    },
+
+    // 3. 飞书特定群组 → researcher
+    {
+      "agentId": "researcher",
+      "match": {
+        "channel": "feishu",
+        "peer": { "kind": "group", "id": "oc_abc123" }
+      }
+    },
+
+    // 4. Telegram 通道级别 (所有账户)
+    {
+      "agentId": "researcher",
+      "match": {
+        "channel": "telegram",
+        "accountId": "*"
+      }
+    }
+  ]
+}
+```
+
+### 6.5 关键源码文件
+
+| 组件 | 文件 | 作用 |
 |-----|------|------|
-| Agent 配置解析 | `src/agents/agent-scope.ts:118` | `resolveAgentConfig()` |
-| Identity 解析 | `src/agents/identity.ts:6` | `resolveAgentIdentity()` |
-| Workspace 初始化 | `src/agents/workspace.ts:311` | `ensureAgentWorkspace()` |
-| Bootstrap 加载 | `src/agents/workspace.ts:487` | `loadWorkspaceBootstrapFiles()` |
-| 系统提示词构建 | `src/agents/system-prompt.ts` | `buildSystemPrompt()` |
-| 配置文件路径 | `src/config/paths.ts:106` | `resolveCanonicalConfigPath()` |
+| 路由解析 | `src/routing/resolve-route.ts:614` | `resolveAgentRoute()` 核心路由逻辑 |
+| 绑定定义 | `src/config/types.agents.ts:28-59` | 绑定配置类型 |
+| 绑定加载 | `src/config/bindings.ts` | 从配置读取绑定 |
+| Session Key | `src/routing/session-key.ts` | 构建/解析会话标识 |
 
 ---
 
-## 6. 关键设计模式
+## 7. 多 Agent 并发处理机制
 
-### 6.1 依赖注入
+### 7.1 单进程架构
+
+**OpenClaw 是单进程应用，不会为每个 Agent 启动独立进程。**
+
+所有 Agent 共享同一个 Node.js 进程，通过**队列和 Lane 机制**实现并发控制。
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     OpenClaw 单进程                               │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │              Command Queue (Lane-based)                      │ │
+│  │  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐      │ │
+│  │  │ session:main  │ │ session:agent │ │ session:agent │      │ │
+│  │  │ :user123      │ │ :assistant:.. │ │ :researcher:.│      │ │
+│  │  │               │ │               │ │               │      │ │
+│  │  │ queue: [task] │ │ queue: [task] │ │ queue: [task] │      │ │
+│  │  │ active: 1     │ │ active: 1     │ │ active: 0     │      │ │
+│  │  └───────────────┘ └───────────────┘ └───────────────┘      │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                     Agent Runners                            │ │
+│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐                        │ │
+│  │  │ Agent 1 │ │ Agent 2 │ │ Agent 3 │  (共享运行时)          │ │
+│  │  │ (main)  │ │(assistant)│(researcher)│                      │ │
+│  │  └─────────┘ └─────────┘ └─────────┘                        │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 Session Lane 机制
+
+**源码**: `src/process/command-queue.ts`
+
+每个会话对应一个独立的 Lane，Lane 内的任务**串行执行**，不同 Lane 的任务**并行执行**。
+
+```typescript
+type LaneState = {
+  lane: string;              // Lane 标识 (session:agent:xxx:...)
+  queue: QueueEntry[];       // 等待队列
+  activeTaskIds: Set<number>;// 正在执行的任务
+  maxConcurrent: number;     // 最大并发数 (默认 1)
+};
+```
+
+**关键函数**:
+
+```typescript
+// 将任务加入指定 Lane
+function enqueueCommandInLane<T>(lane: string, task: () => Promise<T>): Promise<T>
+
+// Session Key 到 Lane 的映射
+export function resolveSessionLane(key: string) {
+  const cleaned = key.trim() || CommandLane.Main;
+  return cleaned.startsWith("session:") ? cleaned : `session:${cleaned}`;
+}
+```
+
+**不同会话 = 不同 Lane = 可以并行执行**
+
+### 7.3 并行执行原理
+
+**核心代码** (`src/process/command-queue.ts:118-143`):
+
+```typescript
+void (async () => {
+  try {
+    const result = await entry.task();  // ⬅️ await 这里释放事件循环
+    // ... 任务完成后继续
+  } catch (err) {
+    entry.reject(err);
+  }
+})();
+```
+
+**关键点**：
+- `void (async () => { ... })()` 立即启动异步函数
+- **不等待它完成**，代码继续执行
+- 当 `await entry.task()` 等待 I/O 时，事件循环可以处理其他 Lane 的任务
+
+### 7.4 并行执行流程图
+
+```
+时间线 →
+
+Lane A (session:agent:main:user1)
+  │
+  ├── enqueueCommandInLane(taskA)
+  │     │
+  │     ▼
+  │   void (async () => {        ◄── 立即返回，不等待
+  │     await taskA();           ◄── 等待 AI API 响应 (释放事件循环)
+  │   })();
+  │
+  │   // drainLane 函数结束，事件循环空闲
+  │
+  │         ╳ 事件循环处理其他任务 ╳
+  │
+  │   ... API 响应后继续 ...
+
+Lane B (session:agent:assistant:user2)        Lane C (session:agent:researcher:user3)
+  │                                              │
+  ├── enqueueCommandInLane(taskB)                ├── enqueueCommandInLane(taskC)
+  │     │                                        │     │
+  │     ▼                                        │     ▼
+  │   void (async () => {                        │   void (async () => {
+  │     await taskB();  ◄── 与 taskA 并发等待    │     await taskC();  ◄── 也并发
+  │   })();                                       │   })();
+```
+
+### 7.5 同一 Lane 内串行保证
+
+**同一个会话内的请求是串行的**，防止竞态条件：
+
+```typescript
+// drainLane 中的 while 循环
+while (state.activeTaskIds.size < state.maxConcurrent && state.queue.length > 0) {
+  // maxConcurrent 默认为 1
+  // 所以 activeTaskIds.size 为 1 时就不再取出新任务
+  const entry = state.queue.shift();
+  state.activeTaskIds.add(taskId);
+
+  void (async () => {
+    await entry.task();
+    state.activeTaskIds.delete(taskId);  // 完成后才删除
+    pump();  // 然后才能继续下一个
+  })();
+}
+```
+
+### 7.6 广播机制
+
+当一条消息需要同时发送给多个 Agent 时：
+
+**源码**: `extensions/feishu/src/bot.ts:953-1088`
+
+```typescript
+if (broadcastAgents) {
+  // 广播策略: parallel (并行) 或 sequential (串行)
+  const strategy = cfg.broadcast?.strategy || "parallel";
+
+  const dispatchForAgent = async (agentId: string) => {
+    if (agentId === activeAgentId) {
+      // Active Agent: 实际回复到飞书
+      await core.channel.reply.dispatchReplyFromConfig({...});
+    } else {
+      // Observer Agent: 只记录会话，不回复
+      await core.channel.reply.dispatchReplyFromConfig({...});
+    }
+  };
+
+  if (strategy === "parallel") {
+    // 并行执行 - Promise.allSettled
+    await Promise.allSettled(broadcastAgents.map(dispatchForAgent));
+  } else {
+    // 串行执行
+    for (const agentId of broadcastAgents) {
+      await dispatchForAgent(agentId);
+    }
+  }
+}
+```
+
+### 7.7 总结
+
+| 问题 | 答案 |
+|-----|------|
+| 多 Agent 是否启动多进程？ | ❌ 否，单进程共享运行时 |
+| 如何实现并发？ | Lane 机制：不同会话 = 不同 Lane = 并行 |
+| 同一会话如何处理？ | 同一 Lane 内串行执行，防止竞态 |
+| 广播如何并发回复？ | `Promise.allSettled()` 并行 dispatch |
+| Observer Agent 回复吗？ | ❌ 只记录会话，不发送消息到通道 |
+| 并行的本质是什么？ | Node.js 事件循环 + 异步 I/O |
+
+---
+
+## 8. Agent 工具系统
+
+### 8.1 session_status 工具
+
+**源码位置**: `src/agents/tools/session-status-tool.ts`
+
+`session_status` 是一个 Agent 工具，用于**查询会话状态信息**，相当于 `/status` 命令的程序化版本。
+
+**核心功能：**
+
+1. **显示会话状态卡片** - 包含用量、时间、成本等信息
+2. **设置模型覆盖** - 可以为特定会话设置临时的模型覆盖
+
+**工具参数：**
+
+```typescript
+const SessionStatusToolSchema = Type.Object({
+  sessionKey: Type.Optional(Type.String()),  // 会话标识
+  model: Type.Optional(Type.String()),       // 可选：模型覆盖
+});
+```
+
+**返回内容：**
+
+| 信息 | 说明 |
+|-----|------|
+| 📊 Usage | API 用量统计（窗口内使用量、重置时间） |
+| 🕒 Time | 当前时间和时区 |
+| Model | 当前使用的模型 |
+| Provider | AI 提供商 |
+| Queue | 消息队列状态（深度、防抖、上限等） |
+
+**使用场景：**
+
+1. **回答用量问题** - 用户问"我用了多少 token"时调用
+2. **动态切换模型** - 用户想临时换模型时设置覆盖
+3. **查看会话信息** - 获取当前会话的详细状态
+
+**调用示例：**
+
+```typescript
+// 查询会话状态
+session_status({ sessionKey: "agent:default:telegram:direct:user123" })
+
+// 切换模型
+session_status({ sessionKey: "...", model: "gpt-4o" })
+
+// 重置模型
+session_status({ sessionKey: "...", model: "default" })
+```
+
+---
+
+## 9. 关键设计模式
+
+### 9.1 依赖注入
 
 通过 `createDefaultDeps()` 创建可测试的依赖：
 
@@ -654,7 +925,7 @@ const deps = createDefaultDeps({
 });
 ```
 
-### 6.2 插件架构
+### 9.2 插件架构
 
 微内核 + 可插拔扩展：
 
@@ -668,7 +939,7 @@ interface ChannelPlugin {
 }
 ```
 
-### 6.3 事件驱动
+### 9.3 事件驱动
 
 使用事件系统解耦模块：
 
@@ -681,7 +952,7 @@ emitAgentEvent('message_sent', { messageId, channel });
 emitSessionLifecycleEvent('session_created', session);
 ```
 
-### 6.4 配置层叠
+### 9.4 配置层叠
 
 多层配置覆盖：
 
@@ -689,7 +960,7 @@ emitSessionLifecycleEvent('session_created', session);
 环境变量 → 运行时覆盖 → 配置文件 → 默认值
 ```
 
-### 6.5 会话持久化
+### 9.5 会话持久化
 
 基于 JSON 文件的会话存储：
 
@@ -717,4 +988,4 @@ const sessionPath = resolveSessionFilePath(storePath, sessionKey);
 
 ---
 
-*文档生成时间: 2026-03-21*
+*文档更新时间: 2026-03-23*
